@@ -1,0 +1,611 @@
+import { useState, useMemo, useCallback } from "react";
+
+// ═══════════════════════════════════════════
+// REFERENCE DATA — sourced from CDC, Road Standards, TSP, R&O 86-95
+// ═══════════════════════════════════════════
+
+const APP_TYPES = [
+  { id: "standard_ld", label: "Standard Land Division / Subdivision", tier: "full", desc: "Full Article V" },
+  { id: "commercial", label: "Commercial / Industrial / Institutional", tier: "full", desc: "Full Article V" },
+  { id: "change_use", label: "Change in Use (>14 ADT increase)", tier: "full", desc: "Full Article V" },
+  { id: "mh_land_div", label: "Middle Housing Land Division", tier: "mhld", desc: "Limited per 501-2.6 D — frontage of resulting lots only" },
+  { id: "single_dw", label: "Single Detached Dwelling (not subject to LD conditions)", tier: "limited", desc: "Limited per 501-2.6 B — ROW, sight distance, TDT only" },
+  { id: "duplex", label: "Duplex on Approved Duplex Lot", tier: "limited", desc: "Limited per 501-2.6 B" },
+  { id: "middle_housing", label: "Middle Housing (shared lot)", tier: "limited", desc: "Limited per 501-2.6 B" },
+  { id: "expansion", label: "Single Dwelling Expansion >2,000 sf", tier: "expansion", desc: "Per 501-2.6 C — Critical + Essential, ROW, sight distance" },
+  { id: "outside_ugb", label: "Development Outside UGB", tier: "outside", desc: "Per 501-9 — Limited application" },
+];
+
+const DESIGNATIONS = {
+  "A-1": { row: 122, paved: 98, lanes: 7, bike: 6, travelLane: 12, centerTurn: 14, exhibit: 1, class: "Arterial", speed: 45 },
+  "A-2": { row: 98, paved: 74, lanes: 5, bike: 6, travelLane: 12, centerTurn: 14, exhibit: 1, class: "Arterial", speed: 45 },
+  "A-3": { row: 90, paved: 60, lanes: 4, bike: 6, travelLane: 12, centerTurn: 0, exhibit: 1, class: "Arterial", speed: 45, note: "Gravel shoulders/ditches allowed" },
+  "A-4": { row: 90, paved: 50, lanes: 3, bike: 6, travelLane: 12, centerTurn: 14, exhibit: 1, class: "Arterial", speed: 45, note: "Gravel shoulders/ditches allowed" },
+  "A-5": { row: 101, paved: 72, lanes: 5, bike: 6, travelLane: 12, centerTurn: 14, exhibit: 1, class: "Arterial", speed: 45 },
+  "C-1": { row: 74, paved: 50, lanes: 3, bike: 6, travelLane: 12, centerTurn: 14, exhibit: 2, class: "Collector", speed: 35 },
+  "C-2": { row: 74, paved: 36, lanes: 2, bike: 6, travelLane: 12, centerTurn: 0, exhibit: 2, class: "Collector", speed: 35, note: "Use ultimate ROW from TSP if known; default 74 ft" },
+  "NR-1": { row: 60, paved: 28, lanes: 2, bike: 0, travelLane: 12, centerTurn: 0, exhibit: 3, class: "Neighborhood Route", speed: 25, note: "Gravel allowed; no parking" },
+  "NR-2": { row: 60, paved: 32, lanes: 2, bike: 0, travelLane: 14, centerTurn: 0, exhibit: 3, class: "Neighborhood Route", speed: 25, note: "Parking one side" },
+  "NR-3": { row: 60, paved: 36, lanes: 2, bike: 0, travelLane: 14, centerTurn: 0, exhibit: 3, class: "Neighborhood Route", speed: 25, note: "Parking both sides" },
+  "L-1": { row: 50, paved: 24, lanes: 2, bike: 0, travelLane: 24, centerTurn: 0, exhibit: 4, class: "Local", speed: 25, note: "No parking; gravel allowed" },
+  "L-2": { row: 38, paved: 32, lanes: 2, bike: 0, travelLane: 16, centerTurn: 0, exhibit: 4, class: "Local", speed: 25, note: "Parking both sides" },
+  "CI-1": { row: 54, paved: 40, lanes: 2, bike: 0, travelLane: 12, centerTurn: 0, exhibit: 5, class: "Commercial/Industrial", speed: 25, note: "Parking both sides" },
+};
+
+// CDC applicability by tier — which improvements can be conditioned
+const CDC_APPLICABILITY = {
+  full: {
+    row_ded: { applies: true, section: "501-8.4 A", note: "Per TSP classification AND Road Standards" },
+    half_street: { applies: true, section: "501-8.1 B(9) (Local/NR), 501-8.2 G (Coll/Art)", note: "If road substandard" },
+    sidewalk: { applies: true, section: "501-8.8 A(6), 502", note: "Per Road Std Drawing 2110" },
+    curb_gutter: { applies: true, section: "501-8.8 A(4)", note: "Half-street element" },
+    bike: { applies: true, section: "501-8.8 A(3)(a)", note: "Where designation includes bike lanes" },
+    storm: { applies: true, section: "501-8.2 B(2), 501-8.8 A(7)", note: "On-site drainage protecting facility" },
+    lighting: { applies: true, section: "501-8.2 C", note: "With half-street; SDL annexation required" },
+    access: { applies: true, section: "501-8.5 B(1-4)", note: "Per road classification spacing standards" },
+    sight_dist: { applies: true, section: "501-8.5 F", note: "Per speed/distance table" },
+    turn_lane: { applies: true, section: "501-8.2 B(1), R&O 86-95", note: "Via traffic safety analysis" },
+    signal: { applies: true, section: "501-8.2 B(1), R&O 86-95 D.1.2.2", note: "MUTCD warrants" },
+    offsite: { applies: true, section: "501-8.2 B(1), 501-8.2 I", note: "Impact area improvements — requires strong nexus/proportionality" },
+    trail: { applies: true, section: "501-8.2 L, 501-8.3 A", note: "Regional Trail per TSP; Community Trail per CDC" },
+    transit: { applies: true, section: "501-8.2 A(2)(c)", note: "Per transit agency service letter" },
+    tdt: { applies: true, section: "501-2.8", note: "Always applies" },
+    sdl: { applies: true, section: "501-8.2 C", note: "Annex to SDL No. 1" },
+    urmd: { applies: true, section: "501-8.1 D", note: "Annex to Urban Road Maintenance District" },
+    espd: { applies: true, section: "501-8.2 K", note: "Annex to Enhanced Sheriff's Patrol District" },
+  },
+  limited: {
+    row_ded: { applies: true, section: "501-8.1 B(2)(a), 501-8.4 B", note: "Limited minimums: Local 25ft CL, NR 30ft, Coll 37ft, Art 45ft" },
+    half_street: { applies: false, section: "501-8.1 B(5)", note: "NOT applicable to this use type" },
+    sidewalk: { applies: false, section: "—", note: "NOT applicable to this use type" },
+    curb_gutter: { applies: false, section: "—", note: "NOT applicable" },
+    bike: { applies: false, section: "—", note: "NOT applicable" },
+    storm: { applies: false, section: "—", note: "NOT applicable" },
+    lighting: { applies: false, section: "—", note: "NOT applicable" },
+    access: { applies: true, section: "501-8.5", note: "Spacing standards apply" },
+    sight_dist: { applies: true, section: "501-8.5 F", note: "Meet or maximize where standards allow" },
+    turn_lane: { applies: false, section: "—", note: "NOT applicable" },
+    signal: { applies: false, section: "—", note: "NOT applicable" },
+    offsite: { applies: false, section: "—", note: "NOT applicable" },
+    trail: { applies: false, section: "—", note: "NOT applicable" },
+    transit: { applies: false, section: "—", note: "NOT applicable" },
+    tdt: { applies: true, section: "501-2.8", note: "Always applies" },
+    sdl: { applies: false, section: "—", note: "NOT applicable" },
+    urmd: { applies: true, section: "501-8.1 D", note: "Annex required" },
+    espd: { applies: true, section: "501-8.2 K", note: "Annex required" },
+  },
+  mhld: {
+    row_ded: { applies: true, section: "501-8.1 B(2)(b), 501-8.4 A", note: "Full functional classification standards — on resulting lot frontage" },
+    half_street: { applies: true, section: "501-8.1 B(9), 501-8.2 G", note: "Frontage of resulting lots ONLY" },
+    sidewalk: { applies: true, section: "501-8.1 B(5)(a), 502", note: "Frontage of resulting lots only" },
+    curb_gutter: { applies: true, section: "501-8.8 A(4)", note: "As part of half-street — resulting lots only" },
+    bike: { applies: true, section: "501-8.8 A(3)(a)", note: "As part of half-street — resulting lots only" },
+    storm: { applies: true, section: "501-8.1 C(4)(b)", note: "Where resulting lots abut street" },
+    lighting: { applies: true, section: "501-8.2 C", note: "Where resulting lots abut street" },
+    access: { applies: true, section: "501-8.5, 430-84.3 B(4)", note: "Triplex/Quad/Townhouse in specific circumstances" },
+    sight_dist: { applies: true, section: "501-8.5 F", note: "Meet or maximize" },
+    turn_lane: { applies: false, section: "—", note: "NOT applicable" },
+    signal: { applies: false, section: "—", note: "NOT applicable" },
+    offsite: { applies: false, section: "—", note: "NOT applicable" },
+    trail: { applies: false, section: "—", note: "NOT applicable" },
+    transit: { applies: false, section: "—", note: "NOT applicable" },
+    tdt: { applies: true, section: "501-2.8", note: "Always applies" },
+    sdl: { applies: true, section: "501-8.2 C", note: "Where resulting lots abut street" },
+    urmd: { applies: true, section: "501-8.1 D", note: "Annex required" },
+    espd: { applies: true, section: "501-8.2 K", note: "Annex required" },
+  },
+  expansion: {
+    row_ded: { applies: true, section: "501-8.4 B(1)", note: "Limited minimums per 501-8.1 B(2)(a)" },
+    half_street: { applies: false, section: "—", note: "NOT applicable" },
+    sidewalk: { applies: false, section: "—", note: "NOT applicable" },
+    curb_gutter: { applies: false, section: "—", note: "NOT applicable" },
+    bike: { applies: false, section: "—", note: "NOT applicable" },
+    storm: { applies: false, section: "—", note: "NOT applicable" },
+    lighting: { applies: false, section: "—", note: "NOT applicable" },
+    access: { applies: true, section: "501-8.5", note: "Only if new access proposed" },
+    sight_dist: { applies: true, section: "501-8.5 F", note: "Only where new driveway proposed" },
+    turn_lane: { applies: false, section: "—", note: "NOT applicable" },
+    signal: { applies: false, section: "—", note: "NOT applicable" },
+    offsite: { applies: false, section: "—", note: "NOT applicable" },
+    trail: { applies: false, section: "—", note: "NOT applicable" },
+    transit: { applies: false, section: "—", note: "NOT applicable" },
+    tdt: { applies: true, section: "501-2.8", note: "Always applies" },
+    sdl: { applies: false, section: "—", note: "NOT applicable" },
+    urmd: { applies: true, section: "501-8.1 D", note: "Annex required" },
+    espd: { applies: true, section: "501-8.2 K", note: "Annex required" },
+  },
+  outside: {
+    row_ded: { applies: true, section: "501-8.4 via 501-9.3", note: "Per 501-9.3" },
+    half_street: { applies: false, section: "—", note: "Only waiver of remonstrance (501-9.8/9.9)" },
+    sidewalk: { applies: false, section: "—", note: "NOT applicable outside UGB" },
+    curb_gutter: { applies: false, section: "—", note: "NOT applicable outside UGB" },
+    bike: { applies: false, section: "—", note: "NOT applicable outside UGB" },
+    storm: { applies: false, section: "—", note: "NOT applicable outside UGB" },
+    lighting: { applies: false, section: "—", note: "NOT applicable outside UGB" },
+    access: { applies: true, section: "501-8.5 via 501-9.3", note: "Arterial access per 501-9.3 C (≥200 ADT)" },
+    sight_dist: { applies: true, section: "501-8.5 F via 501-9.3", note: "Applies per 501-9.3" },
+    turn_lane: { applies: true, section: "501-9.3 B", note: "If ≥500 ADT + traffic analysis by OR PE" },
+    signal: { applies: true, section: "501-9.3 B", note: "If warranted per traffic analysis" },
+    offsite: { applies: false, section: "—", note: "NOT applicable" },
+    trail: { applies: false, section: "—", note: "NOT applicable" },
+    transit: { applies: false, section: "—", note: "NOT applicable" },
+    tdt: { applies: true, section: "501-2.8", note: "Always applies" },
+    sdl: { applies: false, section: "—", note: "NOT applicable outside UGB" },
+    urmd: { applies: false, section: "—", note: "NOT applicable outside UGB" },
+    espd: { applies: false, section: "—", note: "NOT applicable outside UGB" },
+  },
+};
+
+const IMPROVEMENT_LABELS = {
+  row_ded: "Right-of-Way Dedication",
+  half_street: "Half-Street Improvements",
+  sidewalk: "Sidewalk",
+  curb_gutter: "Curb & Gutter",
+  bike: "Bicycle Facility",
+  storm: "Storm Drainage",
+  lighting: "Street Lighting",
+  access: "Access Management",
+  sight_dist: "Sight Distance",
+  turn_lane: "Turn Lane(s)",
+  signal: "Signalization",
+  offsite: "Off-Site Improvements",
+  trail: "Trail / Path",
+  transit: "Transit Improvements",
+  tdt: "Transportation Development Tax",
+  sdl: "SDL Annexation",
+  urmd: "URMD Annexation",
+  espd: "ESPD Annexation",
+};
+
+const ROAD_STD_REF = {
+  row_ded: "Exhibits 1-6 cross-sections",
+  half_street: "§130.030; Exhibits 1-6",
+  sidewalk: "§340.060; Dwg 2110",
+  curb_gutter: "§340.050; Dwg 2010",
+  bike: "§340.010; Exhibits 1-6",
+  storm: "§330; WCCO 15.130.030",
+  lighting: "§350; WCCO 15.08.350; Exhibit 11",
+  access: "§130.020; §340.070",
+  sight_dist: "§130.080 (defers to CDC)",
+  turn_lane: "R&O 86-95 App B; AASHTO",
+  signal: "R&O 86-95 D.1.2.2; MUTCD",
+  offsite: "R&O 86-95 D.2",
+  trail: "Master Plan alignment",
+  transit: "—",
+  tdt: "TDT Ordinance",
+  sdl: "—",
+  urmd: "—",
+  espd: "—",
+};
+
+const SIGHT_TABLE = { 25: 250, 30: 300, 35: 350, 40: 400, 45: 450, 50: 500, 55: 550 };
+
+const ACCESS_SPACING = {
+  "Local": { spacing: "10 ft from Pt B (25 ft from Pt A)", cdcRef: "501-8.5 B(1)" },
+  "Neighborhood Route": { spacing: "50 ft (Pt C to Pt C); 50 ft from Pt A", cdcRef: "501-8.5 B(2)" },
+  "Collector": { spacing: "100 ft (Pt C to Pt C); 100 ft from Pt A", cdcRef: "501-8.5 B(3)" },
+  "Arterial": { spacing: "600 ft; no private driveway access", cdcRef: "501-8.5 B(4)" },
+  "Commercial/Industrial": { spacing: "Per classification of the road", cdcRef: "501-8.5" },
+};
+
+const ACCESS_REPORT_THRESHOLDS = [
+  { existMin: 0, existMax: 3000, devTrips: 2000 },
+  { existMin: 3001, existMax: 6000, devTrips: 1000 },
+  { existMin: 6001, existMax: Infinity, devTrips: 500 },
+];
+
+// ═══════════════════════════════════════════
+// COMPONENTS
+// ═══════════════════════════════════════════
+
+const S = {
+  root: { fontFamily: "'Segoe UI',system-ui,sans-serif", background: "#f8f9fa", minHeight: "100vh", fontSize: 13, color: "#1a1a2e" },
+  header: { background: "#0f1b2d", color: "#fff", padding: "18px 20px" },
+  maxW: { maxWidth: 960, margin: "0 auto" },
+  tag: { fontSize: 10, fontWeight: 700, letterSpacing: 2, textTransform: "uppercase", color: "#64b5f6" },
+  h1: { margin: "4px 0 2px", fontSize: 18, fontWeight: 700 },
+  sub: { fontSize: 12, color: "#90caf9", margin: 0 },
+  step: { background: "#fff", border: "1px solid #dee2e6", borderRadius: 6, marginBottom: 12, overflow: "hidden" },
+  stepHead: (c, active) => ({ padding: "10px 14px", background: active ? c : "#e9ecef", color: active ? "#fff" : "#495057", display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", borderLeft: `4px solid ${c}` }),
+  stepBody: { padding: "14px 18px" },
+  label: { display: "block", fontSize: 11, fontWeight: 600, color: "#495057", marginBottom: 2 },
+  input: { width: "100%", padding: "6px 8px", border: "1px solid #ced4da", borderRadius: 3, fontSize: 12, fontFamily: "inherit", boxSizing: "border-box" },
+  select: { width: "100%", padding: "6px 8px", border: "1px solid #ced4da", borderRadius: 3, fontSize: 12, fontFamily: "inherit", background: "#fff", boxSizing: "border-box" },
+  grid2: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 },
+  grid3: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 },
+  grid4: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10 },
+  badge: (bg, color) => ({ display: "inline-block", padding: "2px 8px", borderRadius: 3, fontSize: 10, fontWeight: 700, background: bg, color }),
+  alert: (bg, border, color) => ({ padding: "8px 12px", background: bg, border: `1px solid ${border}`, borderRadius: 4, fontSize: 11, color, marginTop: 6, lineHeight: 1.5 }),
+  impRow: (applies) => ({ padding: "8px 0", borderBottom: "1px solid #eee", opacity: applies ? 1 : 0.4 }),
+  pre: { background: "#fff", border: "1px solid #ced4da", borderRadius: 6, padding: 16, fontSize: 11, lineHeight: 1.7, whiteSpace: "pre-wrap", fontFamily: "'Cascadia Code','Consolas',monospace", maxHeight: "75vh", overflow: "auto" },
+  btn: (bg) => ({ padding: "8px 20px", background: bg, color: "#fff", border: "none", borderRadius: 4, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }),
+};
+
+function Field({ label, children, help }) {
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <label style={S.label}>{label}</label>
+      {help && <div style={{ fontSize: 10, color: "#6c757d", marginBottom: 2, fontStyle: "italic" }}>{help}</div>}
+      {children}
+    </div>
+  );
+}
+
+function Step({ title, number, color, children, open, onToggle, badge }) {
+  return (
+    <div style={S.step}>
+      <div style={S.stepHead(color, open)} onClick={onToggle}>
+        <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ background: open ? "rgba(255,255,255,0.25)" : color, color: open ? "#fff" : "#fff", width: 22, height: 22, borderRadius: 3, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 800 }}>{number}</span>
+          <span style={{ fontWeight: 700, fontSize: 13 }}>{title}</span>
+        </span>
+        <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          {badge}
+          <span style={{ fontSize: 16 }}>{open ? "▾" : "▸"}</span>
+        </span>
+      </div>
+      {open && <div style={S.stepBody}>{children}</div>}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════
+// REPORT GENERATOR
+// ═══════════════════════════════════════════
+
+function generateReport(p) {
+  const des = DESIGNATIONS[p.designation] || {};
+  const halfROW = des.row ? Math.ceil(des.row / 2) : "___";
+  const tier = APP_TYPES.find(a => a.id === p.appType)?.tier || "full";
+  const cdcApp = CDC_APPLICABILITY[tier] || CDC_APPLICABILITY.full;
+  const road = p.roadName || "[Road Name]";
+  const classLabel = des.class || "[classification]";
+  const sightDist = SIGHT_TABLE[Number(p.speed) || des.speed] || "___";
+  const accSpacing = ACCESS_SPACING[des.class] || {};
+  const L = [];
+
+  L.push("Attachment D\nTRANSPORTATION REPORT\n\nFINDINGS:\n");
+
+  // 1. PROJECT
+  L.push("1.\tPROJECT PROPOSAL\n");
+  L.push(`\ta.\tThis application proposes ${p.proposedUse || "[proposed use]"} on a ±${p.acreage || "___"}-acre property (Washington County Assessor's Map ${p.assessorMap || "___"}; Tax Lot ${p.taxLot || "___"}).`);
+  L.push(`\n\tb.\tAccording to the Access Report, prepared by ${p.reportFirm || "[firm]"} (Exhibit ${p.reportExhibit || "___"}), the proposed use is consistent with the definition of ${p.iteName || "[ITE use]"} (ITE ${p.iteCode || "___"}). The proposed use is expected to have ${p.tripCount || "___"} ${p.tripBasis || "[basis]"}. This will generate an average of ${p.adt || "___"} daily vehicle trips${p.pmPeak ? ` and ${p.pmPeak} PM peak-hour trips` : ""}.\n`);
+
+  // 2. EXISTING CONDITIONS
+  L.push("2.\tEXISTING CONDITIONS\n");
+  if (p.platRestriction === "yes" || p.unpermittedAccess === "yes") {
+    L.push(`\ta.\t${p.platRestriction === "yes" ? `Per ${p.platRef || "[Plat Reference]"}, vehicle access to ${road} is restricted. ` : ""}${p.unpermittedAccess === "yes" ? `Washington County has no record of permits for the current driveway connection to ${road}.` : ""}`);
+  }
+  L.push(`\n\tb.\t${road}. This road has a ±${p.existPaved || "___"}-foot-wide paved width. The right-of-way abutting the site is ${p.existROW || "___"} feet wide. The monumented centerline is ${p.clToProp || "___"} feet from the front property line. The posted speed limit is ${p.speed || "___"} mph.\n`);
+
+  // 3. TSP
+  L.push("3.\tTRANSPORTATION SYSTEM PLAN (TSP)\n");
+  L.push(`\ta.\tRoad Element: ${road} is classified as a ${classLabel} road. Per TSP Table 3, the ultimate design requires ${des.row || "___"} feet of ROW and ${des.paved || "___"} feet of paved width.`);
+  if (des.class === "Arterial") L.push(`\n\t\tAccess Management: Direct access to arterial roadways shall be from collector or arterial roadways.`);
+  L.push(`\n\tb.\tTransit: ${p.transit === "none" ? "No regular or frequent service bus lines within a quarter mile." : (p.transitDesc || "[describe]")}\n`);
+
+  // 4. CDC & ROAD STANDARDS
+  L.push("4.\tSTREETS AND RIGHT-OF-WAY DESIGN\n");
+  L.push(`\ta.\tCDC ARTICLE V — PUBLIC FACILITIES AND SERVICES\n`);
+  const appLabel = APP_TYPES.find(a => a.id === p.appType)?.label || "[application type]";
+  L.push(`\t\tApplication Type: ${appLabel}. CDC applicability determined per Section 501-2.`);
+  L.push(`\t\tCDC Section 501-2 applies to all new uses generating more than 14 vehicle trips.`);
+  if (tier === "full") {
+    L.push(`\t\tFull Article V applies. CDC 501-8.1 (Critical), 501-8.2 (Essential), 501-8.3 (Desirable), 501-8.4 (ROW), 501-8.5 (Access), 501-8.8 (Half-Street), and 502 (Sidewalk) are applicable.`);
+  } else if (tier === "limited") {
+    L.push(`\t\tLimited application per 501-2.6 B: Sections 501-8.4 (ROW dedication — limited minimums), 501-8.5 F (sight distance), and 501-2.8 (TDT) apply.`);
+  } else if (tier === "mhld") {
+    L.push(`\t\tMiddle Housing Land Division per 501-2.6 D: Half-street, sidewalk, and lighting requirements apply only to frontage of resulting lots. Full ROW per functional classification.`);
+  }
+  if (des.class === "Arterial" && cdcApp.access?.applies) {
+    L.push(`\t\tCDC 501-8.5.B(4): Private driveways not allowed direct access onto arterials. Changes increasing trips >25% require conformance per 440-10.`);
+  }
+  L.push(`\n\tb.\tROAD DESIGN AND CONSTRUCTION STANDARDS`);
+  L.push(`\t\t${road}: Designation ${p.designation || "___"} in Exhibit ${des.exhibit || "___"}, requiring ${des.row || "___"} ft ROW.`);
+  L.push(`\t\tHalf-ROW from centerline: ${halfROW} ft.`);
+  if (p.existROW && des.row) {
+    const deficit = des.row - Number(p.existROW);
+    L.push(`\t\tROW deficit: ${deficit > 0 ? deficit + " ft (dedication needed)" : "None (meets standard)"}.`);
+  }
+  L.push("");
+
+  // 5. NEXUS & PROPORTIONALITY
+  L.push("5.\tPROPORTIONALITY AND NEXUS ANALYSIS\n");
+  L.push(`\ta.\tEssential Nexus: The conditions serve legitimate public purposes of traffic safety, pedestrian/bicycle safety, and compliance with adopted standards. The development will generate ${p.adt || "___"} ADT and increase demand on ${road}, which does not meet adopted standards for a ${classLabel} road.`);
+  if (cdcApp.row_ded?.applies && p.existROW && des.row && des.row > Number(p.existROW)) {
+    L.push(`\t\tROW dedication: Existing ${p.existROW} ft is ${des.row - Number(p.existROW)} ft less than the ${des.row}-ft standard.`);
+  }
+  L.push(`\n\tb.\tRough Proportionality: Conditions limited to the development's ${p.frontage || "___"} ft of frontage — the proportional share of improvements to the abutting facility.`);
+  L.push(`\t\tNOTE: TDT addresses system-wide capacity. These conditions address site-specific standards and safety.\n`);
+
+  // 6. TRAFFIC SAFETY
+  L.push("6.\tTRAFFIC SAFETY REVIEW (R&O 86-95)\n");
+  L.push(`\t\tImpact area: intersections where site traffic ≥ 10% of existing volume.`);
+  L.push(`\t\t${p.tripIncrease25 === "yes" ? "The proposed use will increase trips >25%." : "Trips will not increase >25%."}`);
+  L.push(`\t\t${p.offSiteWarrants === "yes" ? "Off-site warrants identified: " + (p.offSiteWarrantsDesc || "[describe]") : "No off-site safety warrants identified."}`);
+  L.push(`\t\tMinimum Safety Improvements: signalization per MUTCD; sidewalks at ultimate grade; sight distance per CDC 501-8.5.F (${sightDist} ft at ${p.speed || des.speed || "___"} mph); lighting at adjacent intersections.\n`);
+
+  // 7. MAINTENANCE
+  L.push("7.\tMAINTENANCE PROVISIONS\n");
+  L.push(`\ta.\t${road} is maintained by Washington County.`);
+  L.push(`\tb.\tPer CDC 501-8.2(C), the applicant shall assure lighting maintenance through SDL annexation.\n`);
+
+  // 8. CONDITIONS
+  L.push("8.\tREQUIRED PERMITS AND RECOMMENDED CONDITIONS OF APPROVAL\n");
+  L.push(`\ta.\tFacility Permit required. $${p.adminDeposit || "18,000"} Administration Deposit.\n`);
+  L.push(`\tb.\t${road}\n`);
+
+  // Generate conditions only for applicable improvements where reviewer confirmed
+  const conditions = [];
+  if (cdcApp.row_ded?.applies && p.confirm_row_ded !== "no") {
+    conditions.push(`ROW Dedication: Dedicate to ${halfROW} ft from centerline for ${p.designation} designation. Per ${cdcApp.row_ded.section}. Prior to occupancy.`);
+  }
+  if (cdcApp.access?.applies) {
+    if (p.unpermittedAccess === "yes") conditions.push(`Access: Close unpermitted access${p.platRef ? ` per ${p.platRef}` : ""}.`);
+    if (p.tripIncrease25 === "yes" || p.interimAccess === "yes") conditions.push(`Access: Design Exception required for driveway. Driveways per commercial approach standard.`);
+    conditions.push(`Access: Preliminary Sight Distance Certification required (${sightDist} ft at ${p.speed || des.speed || "___"} mph).`);
+  }
+  if (cdcApp.half_street?.applies && p.confirm_half_street !== "no") {
+    conditions.push(`Half-Street: Construct per ${p.designation} standard, Exhibit ${des.exhibit}. Per ${cdcApp.half_street.section}.`);
+  }
+  if (cdcApp.lighting?.applies && p.confirm_lighting !== "no") {
+    conditions.push(`Lighting: Per WCCO 15.08.350, Exhibit 11. SDL annexation required.`);
+  }
+  if (cdcApp.storm?.applies && p.confirm_storm !== "no") {
+    conditions.push(`Stormwater: Confirm/upgrade per WCCO 15.130.030 & 15.340.120.`);
+  }
+  conditions.forEach((c, i) => L.push(`\t\t${i + 1}. ${c}`));
+
+  return L.join("\n");
+}
+
+// ═══════════════════════════════════════════
+// MAIN
+// ═══════════════════════════════════════════
+
+export default function ReviewEngine() {
+  const [p, setP] = useState({
+    appType: "", roadName: "", designation: "", existROW: "", existPaved: "",
+    clToProp: "", speed: "", frontage: "", adt: "", pmPeak: "", proposedUse: "",
+    acreage: "", assessorMap: "", taxLot: "", iteCode: "", iteName: "", tripBasis: "",
+    tripCount: "", reportFirm: "", reportExhibit: "", platRestriction: "no", platRef: "",
+    unpermittedAccess: "no", tripIncrease25: "no", interimAccess: "no",
+    offSiteWarrants: "no", offSiteWarrantsDesc: "", transit: "none", transitDesc: "",
+    spisRating: "", spisHazardous: "no", adminDeposit: "18,000",
+    confirm_row_ded: "yes", confirm_half_street: "yes", confirm_lighting: "yes", confirm_storm: "yes",
+  });
+  const [openSteps, setOpenSteps] = useState({ 1: true, 2: true, 3: false, 4: false, 5: false, 6: false });
+  const [view, setView] = useState("form");
+
+  const set = useCallback((k, v) => setP(prev => ({ ...prev, [k]: v })), []);
+  const toggle = (n) => setOpenSteps(prev => ({ ...prev, [n]: !prev[n] }));
+
+  const des = DESIGNATIONS[p.designation] || {};
+  const tier = APP_TYPES.find(a => a.id === p.appType)?.tier || "";
+  const cdcApp = CDC_APPLICABILITY[tier] || {};
+  const halfROW = des.row ? Math.ceil(des.row / 2) : null;
+  const deficit = (p.existROW && des.row) ? des.row - Number(p.existROW) : null;
+  const sightDist = SIGHT_TABLE[Number(p.speed) || des.speed] || null;
+  const accSpacing = ACCESS_SPACING[des.class] || {};
+
+  // Count applicable improvements
+  const applicableCount = useMemo(() => {
+    if (!tier) return 0;
+    return Object.values(cdcApp).filter(v => v?.applies).length;
+  }, [tier, cdcApp]);
+
+  const alertCount = useMemo(() => {
+    let count = 0;
+    if (deficit !== null && deficit > 0) count++;
+    if (p.unpermittedAccess === "yes") count++;
+    if (p.tripIncrease25 === "yes") count++;
+    if (des.class === "Arterial" && tier) count++;
+    return count;
+  }, [deficit, p.unpermittedAccess, p.tripIncrease25, des.class, tier]);
+
+  return (
+    <div style={S.root}>
+      <div style={S.header}>
+        <div style={S.maxW}>
+          <div style={S.tag}>Washington County LUT · Engineering & Planning</div>
+          <h1 style={S.h1}>Transportation Review Decision Engine</h1>
+          <p style={S.sub}>Enter project data → System determines applicable standards → Confirm → Generate report</p>
+        </div>
+      </div>
+
+      <div style={{ ...S.maxW, padding: "12px 16px" }}>
+        <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+          <button onClick={() => setView("form")} style={S.btn(view === "form" ? "#0f1b2d" : "#6c757d")}>Review Form</button>
+          <button onClick={() => setView("matrix")} style={S.btn(view === "matrix" ? "#0f1b2d" : "#6c757d")}>Applicability Matrix</button>
+          <button onClick={() => setView("report")} style={S.btn(view === "report" ? "#0f1b2d" : "#6c757d")}>Generated Report</button>
+          {alertCount > 0 && <span style={S.badge("#dc3545", "#fff")}>{alertCount} ALERT{alertCount > 1 ? "S" : ""}</span>}
+        </div>
+
+        {view === "form" && (
+          <>
+            {/* STEP 1: Application Type */}
+            <Step title="Application Type & CDC Applicability" number="1" color="#1565c0" open={openSteps[1]} onToggle={() => toggle(1)}
+              badge={tier && <span style={S.badge("#e3f2fd", "#1565c0")}>{APP_TYPES.find(a => a.id === p.appType)?.desc}</span>}>
+              <Field label="Application Type" help="This determines which CDC sections apply — the most critical decision">
+                <select value={p.appType} onChange={e => set("appType", e.target.value)} style={{ ...S.select, borderColor: "#1565c0", fontWeight: 600, padding: "10px 8px", fontSize: 13 }}>
+                  <option value="">— Select Application Type —</option>
+                  {APP_TYPES.map(a => <option key={a.id} value={a.id}>{a.label}</option>)}
+                </select>
+              </Field>
+              {tier && (
+                <div style={S.alert("#e3f2fd", "#90caf9", "#0d47a1")}>
+                  <strong>CDC Applicability: {APP_TYPES.find(a => a.id === p.appType)?.desc}</strong><br />
+                  {applicableCount} improvement categories can be conditioned for this application type. Non-applicable categories are grayed out below.
+                  {tier === "limited" && <><br /><strong>⚠ Limited application:</strong> Only ROW dedication (to minimums), sight distance, access spacing, and TDT. Half-street, sidewalk, lighting, and other improvements CANNOT be conditioned.</>}
+                  {tier === "mhld" && <><br /><strong>Note:</strong> Improvements limited to frontage of resulting lots/parcels only per 501-2.6 D.</>}
+                </div>
+              )}
+            </Step>
+
+            {/* STEP 2: Project & Road */}
+            <Step title="Project Data & Road Profile" number="2" color="#2e7d32" open={openSteps[2]} onToggle={() => toggle(2)}
+              badge={p.designation && <span style={S.badge("#e8f5e9", "#2e7d32")}>{p.designation} · {des.row}ft ROW</span>}>
+              <div style={S.grid3}>
+                <Field label="Road Name"><input value={p.roadName} onChange={e => set("roadName", e.target.value)} style={S.input} /></Field>
+                <Field label="Road Design Designation" help="Per Exhibits 1-6 of Road Standards">
+                  <select value={p.designation} onChange={e => set("designation", e.target.value)} style={{ ...S.select, borderColor: "#2e7d32" }}>
+                    <option value="">Select...</option>
+                    {Object.entries(DESIGNATIONS).map(([k, v]) => <option key={k} value={k}>{k} — {v.class} ({v.row}ft ROW, {v.paved}ft paved)</option>)}
+                  </select>
+                </Field>
+                <Field label="Frontage Length (ft)"><input value={p.frontage} onChange={e => set("frontage", e.target.value)} style={S.input} /></Field>
+              </div>
+              {des.row && (
+                <div style={S.alert("#e8f5e9", "#a5d6a7", "#1b5e20")}>
+                  <strong>Auto-filled from {p.designation}:</strong> {des.row}ft ROW · {des.paved}ft paved · {des.lanes} lanes · {des.bike ? des.bike + "ft bike" : "no bike lane"} · {des.centerTurn ? des.centerTurn + "ft center turn" : "no center turn"} · Exhibit {des.exhibit} · {des.speed}mph design · Half-ROW: {halfROW}ft · Sight distance: {SIGHT_TABLE[des.speed]}ft
+                  {des.note && <><br /><em>{des.note}</em></>}
+                </div>
+              )}
+              <div style={S.grid4}>
+                <Field label="Existing ROW (ft)"><input value={p.existROW} onChange={e => set("existROW", e.target.value)} style={S.input} /></Field>
+                <Field label="Existing Paved (ft)"><input value={p.existPaved} onChange={e => set("existPaved", e.target.value)} style={S.input} /></Field>
+                <Field label="CL to Property (ft)"><input value={p.clToProp} onChange={e => set("clToProp", e.target.value)} style={S.input} /></Field>
+                <Field label="Posted Speed (mph)"><input value={p.speed} onChange={e => set("speed", e.target.value)} style={S.input} /></Field>
+              </div>
+              {deficit !== null && deficit > 0 && (
+                <div style={S.alert("#ffebee", "#ef9a9a", "#b71c1c")}>
+                  <strong>ROW DEFICIT: {deficit} ft.</strong> Existing {p.existROW}ft vs. required {des.row}ft. Dedication of {deficit > 0 ? Math.ceil(deficit/2) : 0}+ ft from property line needed.
+                </div>
+              )}
+              <div style={{ ...S.grid3, marginTop: 8 }}>
+                <Field label="Proposed Use"><input value={p.proposedUse} onChange={e => set("proposedUse", e.target.value)} style={S.input} /></Field>
+                <Field label="ADT"><input value={p.adt} onChange={e => set("adt", e.target.value)} style={S.input} /></Field>
+                <Field label="PM Peak Trips"><input value={p.pmPeak} onChange={e => set("pmPeak", e.target.value)} style={S.input} /></Field>
+              </div>
+              <div style={S.grid4}>
+                <Field label="ITE Code"><input value={p.iteCode} onChange={e => set("iteCode", e.target.value)} style={S.input} placeholder="e.g., 180" /></Field>
+                <Field label="ITE Name"><input value={p.iteName} onChange={e => set("iteName", e.target.value)} style={S.input} placeholder="e.g., Specialty Trade Contractor" /></Field>
+                <Field label="Trip Basis"><input value={p.tripBasis} onChange={e => set("tripBasis", e.target.value)} style={S.input} placeholder="e.g., employees" /></Field>
+                <Field label="Count"><input value={p.tripCount} onChange={e => set("tripCount", e.target.value)} style={S.input} /></Field>
+              </div>
+              <div style={S.grid4}>
+                <Field label="Acreage"><input value={p.acreage} onChange={e => set("acreage", e.target.value)} style={S.input} /></Field>
+                <Field label="Assessor Map"><input value={p.assessorMap} onChange={e => set("assessorMap", e.target.value)} style={S.input} /></Field>
+                <Field label="Tax Lot"><input value={p.taxLot} onChange={e => set("taxLot", e.target.value)} style={S.input} /></Field>
+                <Field label="Report Firm"><input value={p.reportFirm} onChange={e => set("reportFirm", e.target.value)} style={S.input} /></Field>
+              </div>
+            </Step>
+
+            {/* STEP 3: Access & Safety */}
+            <Step title="Access & Traffic Safety" number="3" color="#c62828" open={openSteps[3]} onToggle={() => toggle(3)}>
+              <div style={S.grid2}>
+                <Field label="Plat Restriction on Access?">
+                  <select value={p.platRestriction} onChange={e => set("platRestriction", e.target.value)} style={S.select}>
+                    <option value="no">No</option><option value="yes">Yes</option>
+                  </select>
+                </Field>
+                {p.platRestriction === "yes" && <Field label="Plat Reference"><input value={p.platRef} onChange={e => set("platRef", e.target.value)} style={S.input} /></Field>}
+              </div>
+              <div style={S.grid3}>
+                <Field label="Unpermitted Access?"><select value={p.unpermittedAccess} onChange={e => set("unpermittedAccess", e.target.value)} style={S.select}><option value="no">No</option><option value="yes">Yes</option></select></Field>
+                <Field label="Trip Increase >25%?" help="440-10 conformance trigger"><select value={p.tripIncrease25} onChange={e => set("tripIncrease25", e.target.value)} style={S.select}><option value="no">No</option><option value="yes">Yes</option></select></Field>
+                <Field label="Interim Access?"><select value={p.interimAccess} onChange={e => set("interimAccess", e.target.value)} style={S.select}><option value="no">No</option><option value="yes">Yes</option></select></Field>
+              </div>
+              {des.class && accSpacing.spacing && (
+                <div style={S.alert("#fff3e0", "#ffcc80", "#e65100")}>
+                  <strong>Access Standard ({des.class}):</strong> {accSpacing.spacing} · CDC {accSpacing.cdcRef}
+                  {des.class === "Arterial" && <><br />⚠ <strong>Arterial restriction:</strong> No private driveway access. Type II exception required if collector access unavailable.</>}
+                </div>
+              )}
+              <div style={S.grid3}>
+                <Field label="SPIS Rating"><input value={p.spisRating} onChange={e => set("spisRating", e.target.value)} style={S.input} /></Field>
+                <Field label="SPIS Hazardous? (≥32.24)"><select value={p.spisHazardous} onChange={e => set("spisHazardous", e.target.value)} style={S.select}><option value="no">No</option><option value="yes">Yes</option></select></Field>
+                <Field label="Off-Site Warrants?"><select value={p.offSiteWarrants} onChange={e => set("offSiteWarrants", e.target.value)} style={S.select}><option value="no">No</option><option value="yes">Yes</option></select></Field>
+              </div>
+              {p.offSiteWarrants === "yes" && <Field label="Off-Site Warrant Description"><input value={p.offSiteWarrantsDesc} onChange={e => set("offSiteWarrantsDesc", e.target.value)} style={S.input} /></Field>}
+              <div style={S.grid2}>
+                <Field label="Transit Service"><select value={p.transit} onChange={e => set("transit", e.target.value)} style={S.select}><option value="none">None within ¼ mile</option><option value="regular">Regular service</option><option value="frequent">Frequent service</option></select></Field>
+                <Field label="Admin Deposit ($)"><input value={p.adminDeposit} onChange={e => set("adminDeposit", e.target.value)} style={S.input} /></Field>
+              </div>
+            </Step>
+
+            {/* STEP 4: Confirm Improvements */}
+            <Step title="Confirm Improvement Conditions" number="4" color="#6a1b9a" open={openSteps[4]} onToggle={() => toggle(4)}
+              badge={tier && <span style={S.badge("#f3e5f5", "#6a1b9a")}>{applicableCount} applicable</span>}>
+              {tier ? (
+                <div>
+                  <div style={{ fontSize: 11, color: "#6c757d", marginBottom: 8 }}>Review each improvement. Applicable items are pre-set to "Include." Override only where justified. Gray items cannot be conditioned for this application type.</div>
+                  {Object.entries(IMPROVEMENT_LABELS).map(([id, label]) => {
+                    const app = cdcApp[id];
+                    const applies = app?.applies;
+                    return (
+                      <div key={id} style={S.impRow(applies)}>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                          <div style={{ flex: 1 }}>
+                            <span style={{ fontWeight: 600, fontSize: 12 }}>{label}</span>
+                            <span style={{ fontSize: 10, color: "#6c757d", marginLeft: 8 }}>{applies ? `CDC ${app.section}` : app?.note || ""}</span>
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{ fontSize: 10, color: "#9e9e9e" }}>{ROAD_STD_REF[id]}</span>
+                            {applies ? (
+                              <span style={S.badge("#e8f5e9", "#2e7d32")}>APPLICABLE</span>
+                            ) : (
+                              <span style={S.badge("#eeeeee", "#9e9e9e")}>N/A</span>
+                            )}
+                          </div>
+                        </div>
+                        {applies && app.note && <div style={{ fontSize: 10, color: "#6a1b9a", marginTop: 2 }}>{app.note}</div>}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div style={{ color: "#6c757d", fontStyle: "italic" }}>Select an application type in Step 1 to see the applicability matrix.</div>
+              )}
+            </Step>
+
+            <div style={{ textAlign: "center", padding: 16 }}>
+              <button onClick={() => setView("report")} style={S.btn("#0f1b2d")}>Generate Transportation Report →</button>
+            </div>
+          </>
+        )}
+
+        {view === "matrix" && tier && (
+          <div style={{ background: "#fff", border: "1px solid #dee2e6", borderRadius: 6, padding: 16 }}>
+            <h2 style={{ fontSize: 15, fontWeight: 700, marginBottom: 12 }}>CDC Applicability Matrix — {APP_TYPES.find(a => a.id === p.appType)?.label}</h2>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+              <thead>
+                <tr style={{ background: "#f8f9fa" }}>
+                  <th style={{ textAlign: "left", padding: "6px 8px", borderBottom: "2px solid #dee2e6" }}>Improvement</th>
+                  <th style={{ textAlign: "center", padding: "6px 8px", borderBottom: "2px solid #dee2e6" }}>Applies?</th>
+                  <th style={{ textAlign: "left", padding: "6px 8px", borderBottom: "2px solid #dee2e6" }}>CDC Section</th>
+                  <th style={{ textAlign: "left", padding: "6px 8px", borderBottom: "2px solid #dee2e6" }}>Road Standard</th>
+                  <th style={{ textAlign: "left", padding: "6px 8px", borderBottom: "2px solid #dee2e6" }}>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(IMPROVEMENT_LABELS).map(([id, label]) => {
+                  const app = cdcApp[id];
+                  return (
+                    <tr key={id} style={{ borderBottom: "1px solid #eee", opacity: app?.applies ? 1 : 0.5 }}>
+                      <td style={{ padding: "5px 8px", fontWeight: 600 }}>{label}</td>
+                      <td style={{ padding: "5px 8px", textAlign: "center" }}>{app?.applies ? <span style={S.badge("#e8f5e9","#2e7d32")}>YES</span> : <span style={S.badge("#eee","#999")}>NO</span>}</td>
+                      <td style={{ padding: "5px 8px", fontFamily: "monospace", fontSize: 10 }}>{app?.section || "—"}</td>
+                      <td style={{ padding: "5px 8px", fontSize: 10 }}>{ROAD_STD_REF[id]}</td>
+                      <td style={{ padding: "5px 8px", fontSize: 10, color: "#6c757d" }}>{app?.note || ""}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {view === "report" && (
+          <div>
+            <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+              <button onClick={() => { navigator.clipboard.writeText(generateReport(p)); }} style={S.btn("#2e7d32")}>Copy to Clipboard</button>
+              <button onClick={() => setView("form")} style={S.btn("#6c757d")}>← Back</button>
+            </div>
+            <pre style={S.pre}>{generateReport(p)}</pre>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
